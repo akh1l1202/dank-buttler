@@ -7,7 +7,7 @@ A Telegram bot that acts as your personal meme concierge. Describe a meme to hav
 ```
 You: "that dog in a burning room saying this is fine"
   → Dank Butler converts to search query: "this is fine dog fire meme"
-  → Searches Tenor → Giphy → Google Images (fallback chain)
+  → Searches Giphy → DuckDuckGo Images (fallback chain)
   → Gemini Vision verifies each candidate result matches your description
   → Sends you the exact meme (GIF/image)
 ```
@@ -25,13 +25,9 @@ You: "that dog in a burning room saying this is fine"
 1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. Click "Create API Key" and copy the key (the free tier is perfectly fine).
 
-### 3. Get a Tenor API Key (Free)
-1. Go to the [Google Cloud Console / Tenor API Quickstart](https://developers.google.com/tenor/guides/quickstart).
-2. Set up a project and copy your API key.
-
-### 4. Get Giphy & SerpAPI Keys (Optional)
-*   **Giphy API Key**: Obtain a free developer key at [Giphy Developers](https://developers.giphy.com).
-*   **SerpAPI Key**: Obtain a key at [SerpAPI](https://serpapi.com) for Google Images fallback (100 free searches/month).
+### 3. Get a Giphy API Key (Free)
+1. Go to [Giphy Developers](https://developers.giphy.com).
+2. Click **Create an App**, name it, describe it, and obtain your API key.
 
 ---
 
@@ -75,7 +71,7 @@ dank-buttler/
    pip install -r requirements.txt
    ```
 5. Set up your environment variables:
-   *   Copy `env.example` to `.env` (or rename it).
+   *   Copy `.env.example` to `.env` (or rename it).
    *   Open `.env` and fill in your keys.
 
 ---

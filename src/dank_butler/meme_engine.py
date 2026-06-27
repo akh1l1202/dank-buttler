@@ -40,7 +40,7 @@ class MemeEngine:
 
     async def _description_to_query(self, description: str) -> str:
         prompt = (
-            f"Convert this meme description into a short, precise Google/Tenor search query (max 6 words). "
+            f"Convert this meme description into a short, precise Google/Giphy search query (max 6 words). "
             f"Return ONLY the search query, nothing else.\n\nDescription: {description}"
         )
         return await self._gemini(prompt)
@@ -69,40 +69,9 @@ class MemeEngine:
             logger.warning(f"Verify failed for {image_url}: {e}")
             return False, ""
 
-    # ── Source 1: Tenor ──────────────────────────────────────────────────────
-
-    async def _search_tenor(self, query: str, description: str) -> Optional[dict]:
-        if not self.config.tenor_key:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    "https://tenor.googleapis.com/v2/search",
-                    params={"q": query, "key": self.config.tenor_key, "limit": 5, "media_filter": "gif"}
-                )
-                resp.raise_for_status()
-                results = resp.json().get("results", [])
-
-            for item in results:
-                gif_url = item["media_formats"]["gif"]["url"]
-                matched, explanation = await self._verify_meme(gif_url, description)
-                if matched:
-                    return {
-                        "url": gif_url,
-                        "title": item.get("content_description", query),
-                        "type": "gif",
-                        "source": "via Tenor",
-                        "explanation": explanation
-                    }
-        except Exception as e:
-            logger.warning(f"Tenor search failed: {e}")
-        return None
-
-    # ── Source 2: Giphy ──────────────────────────────────────────────────────
+    # ── Source 1: Giphy ──────────────────────────────────────────────────────
 
     async def _search_giphy(self, query: str, description: str) -> Optional[dict]:
-        if not self.config.giphy_key:
-            return None
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
@@ -127,7 +96,7 @@ class MemeEngine:
             logger.warning(f"Giphy search failed: {e}")
         return None
 
-    # ── Source 3: DuckDuckGo Image Search ────────────────────────────────────
+    # ── Source 2: DuckDuckGo Image Search ────────────────────────────────────
 
     @staticmethod
     def _ddg_search_sync(query: str) -> list[dict]:
@@ -170,11 +139,7 @@ class MemeEngine:
         query = await self._description_to_query(description)
         logger.info(f"Search query: '{query}' for description: '{description}'")
 
-        # Fallback chain: Tenor → Giphy → DuckDuckGo Images
-        result = await self._search_tenor(query, description)
-        if result:
-            return result
-
+        # Fallback chain: Giphy → DuckDuckGo Images
         result = await self._search_giphy(query, description)
         if result:
             return result
@@ -183,21 +148,21 @@ class MemeEngine:
         if result:
             return result
 
-        # Last resort: return best Tenor result unverified with a link
+        # Last resort: return best Giphy result unverified with a link
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://tenor.googleapis.com/v2/search",
-                    params={"q": query, "key": self.config.tenor_key, "limit": 1, "media_filter": "gif"}
+                    "https://api.giphy.com/v1/gifs/search",
+                    params={"q": query, "api_key": self.config.giphy_key, "limit": 1}
                 )
-                items = resp.json().get("results", [])
+                items = resp.json().get("data", [])
                 if items:
-                    gif_url = items[0]["media_formats"]["gif"]["url"]
+                    gif_url = items[0]["images"]["original"]["url"]
                     return {
                         "url": gif_url,
-                        "title": items[0].get("content_description", query),
+                        "title": items[0].get("title", query),
                         "type": "gif",
-                        "source": "best guess via Tenor",
+                        "source": "best guess via Giphy",
                         "explanation": "⚠️ Couldn't verify this 100% — best match I found."
                     }
         except Exception:
