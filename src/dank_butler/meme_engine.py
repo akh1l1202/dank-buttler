@@ -2,6 +2,7 @@ import httpx
 import base64
 import json
 import logging
+import asyncio
 from typing import Optional
 from dank_butler.config import Config
 
@@ -126,27 +127,27 @@ class MemeEngine:
             logger.warning(f"Giphy search failed: {e}")
         return None
 
-    # ── Source 3: Google Images via SerpAPI ──────────────────────────────────
+    # ── Source 3: DuckDuckGo Image Search ────────────────────────────────────
 
-    async def _search_google_images(self, query: str, description: str) -> Optional[dict]:
-        if not self.config.serp_key:
-            return None
+    @staticmethod
+    def _ddg_search_sync(query: str) -> list[dict]:
+        from ddgs import DDGS
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    "https://serpapi.com/search",
-                    params={
-                        "q": f"{query} meme",
-                        "tbm": "isch",
-                        "api_key": self.config.serp_key,
-                        "num": 5
-                    }
-                )
-                resp.raise_for_status()
-                results = resp.json().get("images_results", [])
+            with DDGS() as ddgs:
+                # Add 'meme' keyword to the search query to ensure relevant results
+                return list(ddgs.images(f"{query} meme", max_results=5))
+        except Exception as e:
+            logger.warning(f"DuckDuckGo search failed: {e}")
+            return []
+
+    async def _search_duckduckgo(self, query: str, description: str) -> Optional[dict]:
+        try:
+            loop = asyncio.get_running_loop()
+            # Run the synchronous DuckDuckGo search in a threadpool executor to keep the bot responsive
+            results = await loop.run_in_executor(None, self._ddg_search_sync, query)
 
             for item in results:
-                img_url = item.get("original")
+                img_url = item.get("image")
                 if not img_url:
                     continue
                 matched, explanation = await self._verify_meme(img_url, description)
@@ -155,11 +156,11 @@ class MemeEngine:
                         "url": img_url,
                         "title": item.get("title", query),
                         "type": "image",
-                        "source": "via Google Images",
+                        "source": "via DuckDuckGo Images",
                         "explanation": explanation
                     }
         except Exception as e:
-            logger.warning(f"Google Images search failed: {e}")
+            logger.warning(f"DuckDuckGo Image search failed: {e}")
         return None
 
     # ── Public methods ────────────────────────────────────────────────────────
@@ -169,7 +170,7 @@ class MemeEngine:
         query = await self._description_to_query(description)
         logger.info(f"Search query: '{query}' for description: '{description}'")
 
-        # Fallback chain: Tenor → Giphy → Google Images
+        # Fallback chain: Tenor → Giphy → DuckDuckGo Images
         result = await self._search_tenor(query, description)
         if result:
             return result
@@ -178,7 +179,7 @@ class MemeEngine:
         if result:
             return result
 
-        result = await self._search_google_images(query, description)
+        result = await self._search_duckduckgo(query, description)
         if result:
             return result
 
