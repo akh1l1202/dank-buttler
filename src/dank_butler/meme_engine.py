@@ -1,0 +1,220 @@
+import httpx
+import base64
+import json
+import logging
+from typing import Optional
+from dank_butler.config import Config
+
+logger = logging.getLogger(__name__)
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+
+class MemeEngine:
+    def __init__(self, config: Config):
+        self.config = config
+
+    async def _gemini(self, prompt: str, image_bytes: bytes = None) -> str:
+        parts = []
+        if image_bytes:
+            parts.append({
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": base64.b64encode(image_bytes).decode()
+                }
+            })
+        parts.append({"text": prompt})
+
+        payload = {"contents": [{"parts": parts}]}
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                GEMINI_URL,
+                params={"key": self.config.gemini_key},
+                json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    async def _description_to_query(self, description: str) -> str:
+        prompt = (
+            f"Convert this meme description into a short, precise Google/Tenor search query (max 6 words). "
+            f"Return ONLY the search query, nothing else.\n\nDescription: {description}"
+        )
+        return await self._gemini(prompt)
+
+    async def _verify_meme(self, image_url: str, description: str) -> tuple[bool, str]:
+        """Download image and ask Gemini if it matches the description."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(image_url)
+                if resp.status_code != 200:
+                    return False, ""
+                image_bytes = resp.content
+
+            prompt = (
+                f"The user is looking for this meme: '{description}'\n\n"
+                f"Does this image match what they're describing? "
+                f"Reply with JSON only: {{\"match\": true/false, \"confidence\": 0-100, \"explanation\": \"brief explanation of the meme\"}}"
+            )
+            result = await self._gemini(prompt, image_bytes)
+            result = result.replace("```json", "").replace("```", "").strip()
+            data = json.loads(result)
+            if data.get("match") and data.get("confidence", 0) >= 60:
+                return True, data.get("explanation", "")
+            return False, ""
+        except Exception as e:
+            logger.warning(f"Verify failed for {image_url}: {e}")
+            return False, ""
+
+    # ── Source 1: Tenor ──────────────────────────────────────────────────────
+
+    async def _search_tenor(self, query: str, description: str) -> Optional[dict]:
+        if not self.config.tenor_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://tenor.googleapis.com/v2/search",
+                    params={"q": query, "key": self.config.tenor_key, "limit": 5, "media_filter": "gif"}
+                )
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+
+            for item in results:
+                gif_url = item["media_formats"]["gif"]["url"]
+                matched, explanation = await self._verify_meme(gif_url, description)
+                if matched:
+                    return {
+                        "url": gif_url,
+                        "title": item.get("content_description", query),
+                        "type": "gif",
+                        "source": "via Tenor",
+                        "explanation": explanation
+                    }
+        except Exception as e:
+            logger.warning(f"Tenor search failed: {e}")
+        return None
+
+    # ── Source 2: Giphy ──────────────────────────────────────────────────────
+
+    async def _search_giphy(self, query: str, description: str) -> Optional[dict]:
+        if not self.config.giphy_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.giphy.com/v1/gifs/search",
+                    params={"q": query, "api_key": self.config.giphy_key, "limit": 5}
+                )
+                resp.raise_for_status()
+                results = resp.json().get("data", [])
+
+            for item in results:
+                gif_url = item["images"]["original"]["url"]
+                matched, explanation = await self._verify_meme(gif_url, description)
+                if matched:
+                    return {
+                        "url": gif_url,
+                        "title": item.get("title", query),
+                        "type": "gif",
+                        "source": "via Giphy",
+                        "explanation": explanation
+                    }
+        except Exception as e:
+            logger.warning(f"Giphy search failed: {e}")
+        return None
+
+    # ── Source 3: Google Images via SerpAPI ──────────────────────────────────
+
+    async def _search_google_images(self, query: str, description: str) -> Optional[dict]:
+        if not self.config.serp_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    "https://serpapi.com/search",
+                    params={
+                        "q": f"{query} meme",
+                        "tbm": "isch",
+                        "api_key": self.config.serp_key,
+                        "num": 5
+                    }
+                )
+                resp.raise_for_status()
+                results = resp.json().get("images_results", [])
+
+            for item in results:
+                img_url = item.get("original")
+                if not img_url:
+                    continue
+                matched, explanation = await self._verify_meme(img_url, description)
+                if matched:
+                    return {
+                        "url": img_url,
+                        "title": item.get("title", query),
+                        "type": "image",
+                        "source": "via Google Images",
+                        "explanation": explanation
+                    }
+        except Exception as e:
+            logger.warning(f"Google Images search failed: {e}")
+        return None
+
+    # ── Public methods ────────────────────────────────────────────────────────
+
+    async def find_meme(self, description: str) -> Optional[dict]:
+        """Main entry: description → search query → fallback chain → verified result."""
+        query = await self._description_to_query(description)
+        logger.info(f"Search query: '{query}' for description: '{description}'")
+
+        # Fallback chain: Tenor → Giphy → Google Images
+        result = await self._search_tenor(query, description)
+        if result:
+            return result
+
+        result = await self._search_giphy(query, description)
+        if result:
+            return result
+
+        result = await self._search_google_images(query, description)
+        if result:
+            return result
+
+        # Last resort: return best Tenor result unverified with a link
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://tenor.googleapis.com/v2/search",
+                    params={"q": query, "key": self.config.tenor_key, "limit": 1, "media_filter": "gif"}
+                )
+                items = resp.json().get("results", [])
+                if items:
+                    gif_url = items[0]["media_formats"]["gif"]["url"]
+                    return {
+                        "url": gif_url,
+                        "title": items[0].get("content_description", query),
+                        "type": "gif",
+                        "source": "best guess via Tenor",
+                        "explanation": "⚠️ Couldn't verify this 100% — best match I found."
+                    }
+        except Exception:
+            pass
+
+        return None
+
+    async def explain_meme(self, image_bytes: bytes) -> str:
+        """Explain a meme image sent by the user."""
+        prompt = (
+            "You are a meme expert. Explain this meme:\n"
+            "1. What is this meme called / what's its origin?\n"
+            "2. What does it mean / when do people use it?\n"
+            "3. What makes it funny?\n\n"
+            "Keep it concise and fun. Use markdown formatting."
+        )
+        try:
+            return await self._gemini(prompt, image_bytes)
+        except Exception as e:
+            logger.error(f"Explain failed: {e}")
+            return "😅 Couldn't analyze that image. Make sure it's a clear meme!"
